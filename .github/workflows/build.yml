@@ -1,0 +1,132 @@
+name: build-apk
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Partir el archivo Hack en archivos reales
+        run: |
+          cat > /tmp/split.py <<'PYEOF'
+          import re, sys, pathlib
+
+          SRC = pathlib.Path("Hack")
+          if not SRC.exists():
+              print("NO EXISTE el archivo Hack en la raiz"); sys.exit(1)
+
+          EXT = re.compile(r"(\.kts|\.gradle|\.kt|\.xml|\.py|\.sh|\.properties|\.pro|\.ya?ml|\.md|\.bat|\.txt|\.json|\.gitignore|\.keep|\.gitkeep|^gradlew)$")
+          lines = SRC.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          def clean(s):
+              t = s.strip().strip("│├└─`*#>=-| \t").strip()
+              t = re.sub(r"^(?:File|Archivo|ARCHIVO|FICHERO)\s*:\s*", "", t)
+              t = t.strip("`").strip()
+              if t.startswith("OverlayTools/"):
+                  t = t[len("OverlayTools/"):]
+              return t
+
+          def is_path(t):
+              if not t or len(t) > 120: return False
+              if " " in t or ":" in t or t.endswith("/"): return False
+              return bool(EXT.search(t))
+
+          creados = []
+          i = 0
+          while i < len(lines):
+              t = clean(lines[i])
+              if is_path(t):
+                  j = i + 1
+                  while j < len(lines) and not lines[j].strip():
+                      j += 1
+                  nxt = clean(lines[j]) if j < len(lines) else ""
+                  if nxt and is_path(nxt):
+                      i += 1
+                      continue
+                  body = []
+                  k = j
+                  if k < len(lines) and lines[k].strip().startswith("```"):
+                      k += 1
+                      while k < len(lines) and not lines[k].strip().startswith("```"):
+                          body.append(lines[k]); k += 1
+                      i = k + 1
+                  else:
+                      while k < len(lines):
+                          tt = clean(lines[k])
+                          if tt and is_path(tt): break
+                          body.append(lines[k]); k += 1
+                      i = k
+                  p = pathlib.Path(t)
+                  p.parent.mkdir(parents=True, exist_ok=True)
+                  txt = "\n".join(body).rstrip() + "\n"
+                  if txt.strip() or not p.exists():
+                      p.write_text(txt, encoding="utf-8")
+                  creados.append(t)
+                  continue
+              i += 1
+
+          fallos = []
+          if not (pathlib.Path("settings.gradle").exists() or pathlib.Path("settings.gradle.kts").exists()):
+              fallos.append("settings.gradle")
+          if not (pathlib.Path("app/build.gradle").exists() or pathlib.Path("app/build.gradle.kts").exists()):
+              fallos.append("app/build.gradle")
+          if not pathlib.Path("app/src/main/AndroidManifest.xml").exists():
+              fallos.append("AndroidManifest.xml")
+          kts = list(pathlib.Path("app/src/main/java").rglob("*.kt")) if pathlib.Path("app/src/main/java").exists() else []
+          if len(kts) < 5:
+              fallos.append("menos de 5 archivos .kt (hay %d)" % len(kts))
+          if fallos:
+              print("SPLIT INCOMPLETO, falta:", ", ".join(fallos)); sys.exit(1)
+          print("SPLIT OK:", len(creados), "secciones,", len(kts), "kotlin")
+          for c in sorted(set(creados)): print("  ", c)
+          PYEOF
+          python3 /tmp/split.py
+
+      - name: Modelo por defecto
+        run: |
+          mkdir -p app/src/main/assets/models
+          if ! ls app/src/main/assets/models/*.tflite >/dev/null 2>&1; then
+            curl -fsSL "https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n_full_integer_quant.tflite" -o app/src/main/assets/models/yolov8n_int8.tflite || true
+          fi
+          for n in $(grep -rhoE '[A-Za-z0-9_./-]+\.tflite' app/src/main/java | sort -u); do
+            mkdir -p "$(dirname "app/src/main/assets/$n")"
+            [ -s "app/src/main/assets/$n" ] || cp app/src/main/assets/models/yolov8n_int8.tflite "app/src/main/assets/$n" || true
+          done
+          ls -la app/src/main/assets/models || true
+
+      - name: Preparar wrapper
+        run: |
+          gradle wrapper --gradle-version 8.7
+          chmod +x gradlew
+
+      - name: Compilar APK
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovltools-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Overlay Tools build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
