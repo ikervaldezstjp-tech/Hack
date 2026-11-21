@@ -19,114 +19,336 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Partir el archivo Hack en archivos reales
+      - name: Partir el archivo Hack
         run: |
           cat > /tmp/split.py <<'PYEOF'
           import re, sys, pathlib
 
           SRC = pathlib.Path("Hack")
           if not SRC.exists():
-              print("NO EXISTE el archivo Hack en la raiz"); sys.exit(1)
+              print("NO EXISTE Hack"); sys.exit(1)
 
-          EXT = re.compile(r"(\.kts|\.gradle|\.kt|\.xml|\.py|\.sh|\.properties|\.pro|\.ya?ml|\.md|\.bat|\.txt|\.json|\.gitignore|\.keep|\.gitkeep|^gradlew)$")
+          SIGS = [
+              ("pluginManagement {", "settings"),
+              ("package com.ovltools.core", "java"),
+              ("<?xml", "xml"),
+              ("plugins {", "gradle"),
+              ("rootProject.name", "settings"),
+              ("org.gradle.jvmargs", "props"),
+              ("distributionBase", "wrapper"),
+              ("*.iml", "gitignore"),
+              ("-keep class", "proguard"),
+              ("name: build", "workflow"),
+              ("#!/usr/bin/env python3", "python"),
+              ("modelo tflite aqui", "keep"),
+          ]
+
+          def sig(line):
+              s = line.strip()
+              for k, v in SIGS:
+                  if s.startswith(k):
+                      return v
+              return None
+
           lines = SRC.read_text(encoding="utf-8", errors="replace").splitlines()
+          segs = []
+          cur = None
+          for ln in lines:
+              t = sig(ln)
+              if t:
+                  cur = {"kind": t, "lines": [ln]}
+                  segs.append(cur)
+              elif cur is not None:
+                  cur["lines"].append(ln)
 
-          def clean(s):
-              t = s.strip().strip("│├└─`*#>=-| \t").strip()
-              t = re.sub(r"^(?:File|Archivo|ARCHIVO|FICHERO)\s*:\s*", "", t)
-              t = t.strip("`").strip()
-              if t.startswith("OverlayTools/"):
-                  t = t[len("OverlayTools/"):]
-              return t
+          def path_for(seg):
+              body = "\n".join(seg["lines"])
+              k = seg["kind"]
+              if k == "java":
+                  m = re.search(r"^package\s+([\w.]+);", body, re.M)
+                  c = re.search(r"\b(?:class|interface|enum)\s+(\w+)", body)
+                  if not m or not c: return None
+                  return "app/src/main/java/" + m.group(1).replace(".", "/") + "/" + c.group(1) + ".java"
+              if k == "xml":
+                  if "<manifest" in body: return "app/src/main/AndroidManifest.xml"
+                  if "accessibility-service" in body: return "app/src/main/res/xml/accessibility_service_config.xml"
+                  if 'name="app_name"' in body: return "app/src/main/res/values/strings.xml"
+                  if "<style" in body: return "app/src/main/res/values/themes.xml"
+                  if "<vector" in body: return "app/src/main/res/drawable/ic_launcher.xml"
+                  if "@+id/obTitle" in body: return "app/src/main/res/layout/activity_onboarding.xml"
+                  if "@+id/skFov" in body: return "app/src/main/res/layout/activity_settings.xml"
+                  if "@+id/btnOverlay" in body: return "app/src/main/res/layout/activity_main.xml"
+                  if "@+id/etName" in body: return "app/src/main/res/layout/activity_profiles.xml"
+                  if "@+id/ruler" in body: return "app/src/main/res/layout/activity_calibration.xml"
+                  return None
+              if k == "gradle":
+                  return "app/build.gradle" if "namespace" in body else "build.gradle"
+              return {"settings": "settings.gradle", "props": "gradle.properties",
+                      "wrapper": "gradle/wrapper/gradle-wrapper.properties",
+                      "gitignore": ".gitignore", "proguard": "app/proguard-rules.pro",
+                      "workflow": ".github/workflows/build.yml",
+                      "python": "tools/export_model.py",
+                      "keep": "app/src/main/assets/models/.keep"}.get(k)
 
-          def is_path(t):
-              if not t or len(t) > 120: return False
-              if " " in t or ":" in t or t.endswith("/"): return False
-              return bool(EXT.search(t))
-
-          creados = []
-          i = 0
-          while i < len(lines):
-              t = clean(lines[i])
-              if is_path(t):
-                  j = i + 1
-                  while j < len(lines) and not lines[j].strip():
-                      j += 1
-                  nxt = clean(lines[j]) if j < len(lines) else ""
-                  if nxt and is_path(nxt):
-                      i += 1
-                      continue
-                  body = []
-                  k = j
-                  if k < len(lines) and lines[k].strip().startswith("```"):
-                      k += 1
-                      while k < len(lines) and not lines[k].strip().startswith("```"):
-                          body.append(lines[k]); k += 1
-                      i = k + 1
-                  else:
-                      while k < len(lines):
-                          tt = clean(lines[k])
-                          if tt and is_path(tt): break
-                          body.append(lines[k]); k += 1
-                      i = k
-                  p = pathlib.Path(t)
-                  p.parent.mkdir(parents=True, exist_ok=True)
-                  txt = "\n".join(body).rstrip() + "\n"
-                  if txt.strip() or not p.exists():
-                      p.write_text(txt, encoding="utf-8")
-                  creados.append(t)
-                  continue
-              i += 1
+          hechos = []
+          for seg in segs:
+              p = path_for(seg)
+              if not p:
+                  print("SIN DESTINO:", seg["kind"], seg["lines"][0][:60]); continue
+              path = pathlib.Path(p)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text("\n".join(seg["lines"]).rstrip() + "\n", encoding="utf-8")
+              hechos.append(p)
 
           fallos = []
-          if not (pathlib.Path("settings.gradle").exists() or pathlib.Path("settings.gradle.kts").exists()):
-              fallos.append("settings.gradle")
-          if not (pathlib.Path("app/build.gradle").exists() or pathlib.Path("app/build.gradle.kts").exists()):
-              fallos.append("app/build.gradle")
-          if not pathlib.Path("app/src/main/AndroidManifest.xml").exists():
-              fallos.append("AndroidManifest.xml")
-          kts = list(pathlib.Path("app/src/main/java").rglob("*.kt")) if pathlib.Path("app/src/main/java").exists() else []
-          if len(kts) < 5:
-              fallos.append("menos de 5 archivos .kt (hay %d)" % len(kts))
+          for req in ["settings.gradle", "app/build.gradle",
+                      "app/src/main/AndroidManifest.xml",
+                      "app/src/main/res/layout/activity_main.xml",
+                      "app/src/main/res/values/themes.xml"]:
+              if not pathlib.Path(req).exists(): fallos.append(req)
+          java = list(pathlib.Path("app/src/main/java").rglob("*.java"))
+          if len(java) < 20: fallos.append("java insuficiente (%d)" % len(java))
           if fallos:
-              print("SPLIT INCOMPLETO, falta:", ", ".join(fallos)); sys.exit(1)
-          print("SPLIT OK:", len(creados), "secciones,", len(kts), "kotlin")
-          for c in sorted(set(creados)): print("  ", c)
+              print("SPLIT INCOMPLETO:", ", ".join(fallos)); sys.exit(1)
+          print("SPLIT OK:", len(hechos), "archivos,", len(java), "java")
           PYEOF
           python3 /tmp/split.py
+
+      - name: Crear los dos archivos que faltan en Hack
+        run: |
+          mkdir -p app/src/main/java/com/ovltools/core/overlay
+          cat > app/src/main/java/com/ovltools/core/MainActivity.java <<'JEOF'
+          package com.ovltools.core;
+
+          import android.Manifest;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.media.projection.MediaProjectionManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import androidx.activity.result.ActivityResultLauncher;
+          import androidx.activity.result.contract.ActivityResultContracts;
+          import androidx.appcompat.app.AlertDialog;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.content.ContextCompat;
+
+          import com.ovltools.core.data.Prefs;
+          import com.ovltools.core.svc.AimAccessibilityService;
+          import com.ovltools.core.svc.AimService;
+
+          public class MainActivity extends AppCompatActivity {
+
+              private TextView status;
+              private Prefs prefs;
+              private ActivityResultLauncher<Intent> captureLauncher;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  prefs = Prefs.get(this);
+                  if (!prefs.onboarded()) {
+                      startActivity(new Intent(this, OnboardingActivity.class));
+                  }
+                  setContentView(R.layout.activity_main);
+                  status = findViewById(R.id.status);
+
+                  captureLauncher = registerForActivityResult(
+                          new ActivityResultContracts.StartActivityForResult(),
+                          result -> {
+                              if (result.getResultCode() != RESULT_OK || result.getData() == null) {
+                                  toast("Captura cancelada");
+                                  return;
+                              }
+                              Intent i = new Intent(this, AimService.class);
+                              i.putExtra("code", result.getResultCode());
+                              i.putExtra("data", result.getData());
+                              ContextCompat.startForegroundService(this, i);
+                          });
+
+                  findViewById(R.id.btnOverlay).setOnClickListener(v -> {
+                      if (Settings.canDrawOverlays(this)) { toast("Ya concedido"); return; }
+                      startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:" + getPackageName())));
+                  });
+                  findViewById(R.id.btnA11y).setOnClickListener(v -> {
+                      if (AimAccessibilityService.isConnected()) { toast("Ya concedido"); return; }
+                      startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                  });
+                  findViewById(R.id.btnStart).setOnClickListener(v -> start());
+                  findViewById(R.id.btnStop).setOnClickListener(v -> {
+                      AimService s = AimService.get();
+                      if (s != null) s.stopAll();
+                      toast("Detenido");
+                  });
+                  findViewById(R.id.btnSettings).setOnClickListener(v ->
+                          startActivity(new Intent(this, SettingsActivity.class)));
+                  findViewById(R.id.btnProfiles).setOnClickListener(v ->
+                          startActivity(new Intent(this, ProfilesActivity.class)));
+                  findViewById(R.id.btnCalib).setOnClickListener(v ->
+                          startActivity(new Intent(this, CalibrationActivity.class)));
+                  findViewById(R.id.btnDiag).setOnClickListener(v -> showDiag());
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 9);
+                  }
+              }
+
+              private void start() {
+                  if (!Settings.canDrawOverlays(this)) { toast("Concede el permiso de superposicion"); return; }
+                  if (!AimAccessibilityService.isConnected()) { toast("Concede el servicio de accesibilidad"); return; }
+                  MediaProjectionManager mpm =
+                          (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                  if (mpm == null) return;
+                  captureLauncher.launch(mpm.createScreenCaptureIntent());
+              }
+
+              private void showDiag() {
+                  AimService s = AimService.get();
+                  String txt = s == null ? "servicio parado" : s.diagnostics();
+                  new AlertDialog.Builder(this)
+                          .setTitle("Diagnostico")
+                          .setMessage(txt)
+                          .setPositiveButton("Cerrar", null)
+                          .show();
+              }
+
+              private void toast(String m) {
+                  Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  StringBuilder sb = new StringBuilder();
+                  sb.append("superposicion: ").append(Settings.canDrawOverlays(this) ? "ok" : "pendiente").append('\n');
+                  sb.append("accesibilidad: ").append(AimAccessibilityService.isConnected() ? "ok" : "pendiente").append('\n');
+                  sb.append("servicio: ").append(AimService.get() != null ? "activo" : "parado").append('\n');
+                  status.setText(sb.toString());
+              }
+          }
+          JEOF
+
+          cat > app/src/main/java/com/ovltools/core/overlay/CanvasOverlay.java <<'JEOF'
+          package com.ovltools.core.overlay;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.view.View;
+
+          import com.ovltools.core.detect.Detection;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class CanvasOverlay extends View {
+
+              private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint cross = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint box = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+              private float ax = -1f;
+              private float ay = -1f;
+              private int fov = 200;
+              private boolean anchorVisible = true;
+              private List<Detection> dets = new ArrayList<>();
+              private float scale = 1f;
+
+              public CanvasOverlay(Context c) {
+                  super(c);
+                  ring.setStyle(Paint.Style.STROKE);
+                  ring.setStrokeWidth(3f);
+                  ring.setColor(0x8836D399);
+                  cross.setStyle(Paint.Style.STROKE);
+                  cross.setStrokeWidth(3f);
+                  cross.setColor(0xCCFFFFFF);
+                  box.setStyle(Paint.Style.STROKE);
+                  box.setStrokeWidth(2f);
+                  box.setColor(0xCCFFC400);
+                  fill.setStyle(Paint.Style.FILL);
+                  fill.setColor(0x22FFC400);
+                  setLayerType(LAYER_TYPE_HARDWARE, null);
+              }
+
+              public void setAnchor(float x, float y) { ax = x; ay = y; invalidate(); }
+
+              public void setFov(int r) { fov = r; invalidate(); }
+
+              public void setAnchorVisible(boolean v) { anchorVisible = v; invalidate(); }
+
+              public void setDetections(List<Detection> d, float s) {
+                  dets = d == null ? new ArrayList<Detection>() : d;
+                  scale = s <= 0f ? 1f : s;
+                  postInvalidate();
+              }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  super.onDraw(c);
+                  if (ax < 0) return;
+                  c.drawCircle(ax, ay, fov, ring);
+                  if (anchorVisible) {
+                      c.drawLine(ax - 18, ay, ax + 18, ay, cross);
+                      c.drawLine(ax, ay - 18, ax, ay + 18, cross);
+                  }
+                  for (Detection d : dets) {
+                      float x1 = d.x1 / scale;
+                      float y1 = d.y1 / scale;
+                      float x2 = d.x2 / scale;
+                      float y2 = d.y2 / scale;
+                      c.drawRect(x1, y1, x2, y2, box);
+                      c.drawRect(x1, y1, x2, y2, fill);
+                  }
+              }
+          }
+          JEOF
 
       - name: Modelo por defecto
         run: |
           mkdir -p app/src/main/assets/models
-          if ! ls app/src/main/assets/models/*.tflite >/dev/null 2>&1; then
-            curl -fsSL "https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n_full_integer_quant.tflite" -o app/src/main/assets/models/yolov8n_int8.tflite || true
-          fi
-          for n in $(grep -rhoE '[A-Za-z0-9_./-]+\.tflite' app/src/main/java | sort -u); do
-            mkdir -p "$(dirname "app/src/main/assets/$n")"
-            [ -s "app/src/main/assets/$n" ] || cp app/src/main/assets/models/yolov8n_int8.tflite "app/src/main/assets/$n" || true
+          D=app/src/main/assets/models/yolov8n_int8.tflite
+          for U in \
+            "https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n_int8.tflite" \
+            "https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n_full_integer_quant.tflite" \
+            "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n_int8.tflite" \
+            "https://github.com/surendramaran/YOLOv8-TfLite-Object-Detector/raw/main/models/yolov8n_int8.tflite" ; do
+            curl -fsSL "$U" -o "$D" || true
+            if [ -s "$D" ] && [ "$(stat -c%s "$D")" -gt 1000000 ]; then echo "modelo ok: $U"; break; fi
           done
-          ls -la app/src/main/assets/models || true
+          ls -l app/src/main/assets/models || true
 
       - name: Preparar wrapper
         run: |
-          gradle wrapper --gradle-version 8.7
+          gradle wrapper --gradle-version 8.7 --distribution-type bin
           chmod +x gradlew
 
       - name: Compilar APK
-        run: ./gradlew --no-daemon --stacktrace assembleDebug
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Subir artifact
-        uses: actions/upload-artifact@v4
+      - name: Nombre del artifact
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/OverlayTools.apk
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: ovltools-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: OverlayTools-apk
+          path: out/*.apk
           retention-days: 30
 
-      - name: Publicar release
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Overlay Tools build ${{ github.run_number }}
-          files: app/build/outputs/apk/debug/*.apk
+          name: Build ${{ github.run_number }}
+          files: out/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
