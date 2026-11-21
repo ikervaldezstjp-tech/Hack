@@ -15,7 +15,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
@@ -94,7 +94,7 @@ jobs:
           for seg in segs:
               p = path_for(seg)
               if not p:
-                  print("SIN DESTINO:", seg["kind"], seg["lines"][0][:60]); continue
+                  print("SIN DESTINO:", seg["kind"], "|", seg["lines"][0][:70]); continue
               path = pathlib.Path(p)
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_text("\n".join(seg["lines"]).rstrip() + "\n", encoding="utf-8")
@@ -108,13 +108,14 @@ jobs:
               if not pathlib.Path(req).exists(): fallos.append(req)
           java = list(pathlib.Path("app/src/main/java").rglob("*.java"))
           if len(java) < 20: fallos.append("java insuficiente (%d)" % len(java))
+          print("RESUMEN:", len(hechos), "archivos,", len(java), "java")
           if fallos:
               print("SPLIT INCOMPLETO:", ", ".join(fallos)); sys.exit(1)
-          print("SPLIT OK:", len(hechos), "archivos,", len(java), "java")
+          print("SPLIT OK")
           PYEOF
-          python3 /tmp/split.py
+          python3 /tmp/split.py 2>&1 | tee split-report.txt
 
-      - name: Crear los dos archivos que faltan en Hack
+      - name: Crear los dos archivos que faltan
         run: |
           mkdir -p app/src/main/java/com/ovltools/core/overlay
           cat > app/src/main/java/com/ovltools/core/MainActivity.java <<'JEOF'
@@ -325,30 +326,18 @@ jobs:
           done
           ls -l app/src/main/assets/models || true
 
-      - name: Preparar wrapper
-        run: |
-          gradle wrapper --gradle-version 8.7 --distribution-type bin
-          chmod +x gradlew
-
       - name: Compilar APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Nombre del artifact
+        if: success()
         run: |
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk out/OverlayTools.apk
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: OverlayTools-apk
-          path: out/*.apk
-          retention-days: 30
-
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          files: out/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Diagnostico si falla
+        if: failure()
+        run: |
+          echo "== split report ==" >> diag.txt
+          cat split-report.txt >> diag.txt 2>/dev/null || true
+          echo "==
