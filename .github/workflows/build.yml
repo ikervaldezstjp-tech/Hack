@@ -113,7 +113,9 @@ jobs:
               print("SPLIT INCOMPLETO:", ", ".join(fallos)); sys.exit(1)
           print("SPLIT OK")
           PYEOF
+          set +e
           python3 /tmp/split.py 2>&1 | tee split-report.txt
+          exit ${PIPESTATUS[0]}
 
       - name: Crear los dos archivos que faltan
         run: |
@@ -327,7 +329,12 @@ jobs:
           ls -l app/src/main/assets/models || true
 
       - name: Compilar APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace > build.log 2>&1
+          RC=$?
+          tail -n 60 build.log
+          exit $RC
 
       - name: Nombre del artifact
         if: success()
@@ -335,9 +342,20 @@ jobs:
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk out/OverlayTools.apk
 
-      - name: Diagnostico si falla
+      - name: Diagnostico
         if: failure()
+        continue-on-error: true
         run: |
-          echo "== split report ==" >> diag.txt
-          cat split-report.txt >> diag.txt 2>/dev/null || true
-          echo "==
+          printf '%s\n' '== split ==' >> diag.txt
+          cat split-report.txt >> diag.txt 2>/dev/null
+          printf '%s\n' '== arbol ==' >> diag.txt
+          find app -type f >> diag.txt 2>/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: OverlayTools-apk
+          path: out/*.apk
+          retention-days: 30
+
+      - uses: actions/upload-artifact@
